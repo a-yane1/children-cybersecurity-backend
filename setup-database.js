@@ -5,24 +5,14 @@
 const mysql = require('mysql2/promise');
 require('dotenv').config();
 
-let dbConfig;
-
-
-if (process.env.DATABASE_URL) {
-    console.log('Using DATABASE_URL for connection...');
-    dbConfig = process.env.DATABASE_URL;
-} else {
-    console.log('Using individual DB parameters...');
-    dbConfig = {
-        host: process.env.DB_HOST,
-        user: process.env.DB_USER,
-        password: process.env.DB_PASSWORD,
-        database: process.env.DB_NAME,
-        port: process.env.DB_PORT || 3306,
-        charset: 'utf8mb4',
-        multipleStatements: true
-    };
-}
+const dbConfig = {
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    charset: 'utf8mb4',
+    multipleStatements: true
+};
 
 async function setupDatabase() {
     let connection;
@@ -274,10 +264,6 @@ async function setupDatabase() {
 
     } catch (error) {
         console.error('❌ Error setting up database:', error);
-        console.error('\n💡 Troubleshooting:');
-        console.error('1. Check your .env file has correct Railway database credentials');
-        console.error('2. Make sure you\'re using the external Railway host, not internal');
-        console.error('3. Verify the database service is running in Railway');
         process.exit(1);
     } finally {
         if (connection) {
@@ -285,7 +271,6 @@ async function setupDatabase() {
         }
     }
 }
-
 
 // Check if required environment variables are set
 if (!process.env.DB_HOST || !process.env.DB_USER || !process.env.DB_PASSWORD || !process.env.DB_NAME) {
