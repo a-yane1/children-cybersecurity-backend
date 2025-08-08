@@ -1,548 +1,575 @@
-// server.js - Main server file
+// Kids Cybersecurity Quiz - Node.js Backend API
+// File: server.js
+
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
-const dotenv = require('dotenv');
-
-// Load environment variables
-dotenv.config();
+const helmet = require('helmet');
+const rateLimit = require('express-rate-limit');
+require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Middleware
-app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+app.use(helmet());
+app.use(cors({
+    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Content-Type', 'Authorization']
+}));
+app.use(express.json({ limit: '10mb' }));
 
-// Database configuration
+// Rate limiting
+const limiter = rateLimit({
+    windowMs: 15 * 60 * 1000, // 15 minutes
+    max: 100 // limit each IP to 100 requests per windowMs
+});
+app.use(limiter);
+
+// Database connection
 const dbConfig = {
-  host: process.env.DB_HOST || 'localhost',
-  user: process.env.DB_USER || 'root',
-  password: process.env.DB_PASSWORD || 'yourpassword',
-  database: process.env.DB_NAME || 'cybersecurity_quiz',
-  waitForConnections: true,
-  connectionLimit: 10,
-  queueLimit: 0
+    host: process.env.DB_HOST || 'localhost',
+    user: process.env.DB_USER || 'root',
+    password: process.env.DB_PASSWORD || '',
+    database: process.env.DB_NAME || 'kids_cybersecurity_quiz',
+    charset: 'utf8mb4'
 };
 
 let db;
 
+async function connectDB() {
+    try {
+        db = await mysql.createConnection(dbConfig);
+        console.log('Connected to MySQL database');
+    } catch (error) {
+        console.error('Database connection failed:', error);
+        process.exit(1);
+    }
+}
+
 // Initialize database connection
-async function initializeDatabase() {
-  try {
-    db = mysql.createPool(dbConfig);
-    
-    // Test connection
-    const connection = await db.getConnection();
-    console.log('Connected to MySQL database');
-    connection.release();
-    
-    // Create tables if they don't exist
-    await createTables();
-    
-  } catch (error) {
-    console.error('Database connection failed:', error);
-    process.exit(1);
-  }
-}
+connectDB();
 
-// Create database tables
-async function createTables() {
-  const tables = [
-    // Users table
-    `CREATE TABLE IF NOT EXISTS users (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      name VARCHAR(100) NOT NULL,
-      total_points INT DEFAULT 0,
-      badges_earned JSON,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
-    )`,
-    
-    // Categories table
-    `CREATE TABLE IF NOT EXISTS categories (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      name VARCHAR(100) NOT NULL,
-      icon VARCHAR(50) NOT NULL,
-      description TEXT,
-      total_questions INT DEFAULT 0,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    )`,
-    
-    // Questions table
-    `CREATE TABLE IF NOT EXISTS questions (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      category_id INT,
-      question_text TEXT NOT NULL,
-      question_type ENUM('multiple_choice', 'true_false', 'visual') NOT NULL,
-      options JSON NOT NULL,
-      correct_answer VARCHAR(255) NOT NULL,
-      explanation TEXT NOT NULL,
-      difficulty_level ENUM('easy', 'medium', 'hard') DEFAULT 'easy',
-      points INT DEFAULT 10,
-      image_url VARCHAR(255),
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      FOREIGN KEY (category_id) REFERENCES categories(id)
-    )`,
-    
-    // User progress table
-    `CREATE TABLE IF NOT EXISTS user_progress (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      user_id INT,
-      category_id INT,
-      questions_answered INT DEFAULT 0,
-      questions_correct INT DEFAULT 0,
-      current_streak INT DEFAULT 0,
-      best_streak INT DEFAULT 0,
-      last_question_id INT,
-      progress_percentage DECIMAL(5,2) DEFAULT 0.00,
-      difficulty_adaptations JSON,
-      last_5_answers JSON,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (category_id) REFERENCES categories(id),
-      UNIQUE KEY unique_user_category (user_id, category_id)
-    )`,
-    
-    // Quiz sessions table
-    `CREATE TABLE IF NOT EXISTS quiz_sessions (
-      id INT PRIMARY KEY AUTO_INCREMENT,
-      user_id INT,
-      category_id INT,
-      questions_answered JSON,
-      current_question_index INT DEFAULT 0,
-      session_score INT DEFAULT 0,
-      session_status ENUM('active', 'completed', 'paused') DEFAULT 'active',
-      adaptive_settings JSON,
-      created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
-      FOREIGN KEY (user_id) REFERENCES users(id),
-      FOREIGN KEY (category_id) REFERENCES categories(id)
-    )`
-  ];
-  
-  for (const table of tables) {
-    await db.execute(table);
-  }
-  
-  console.log('Database tables created successfully');
-  
-  // Seed initial data
-  await seedInitialData();
-}
-
-// Seed initial data
-async function seedInitialData() {
-  // Check if categories exist
-  const [categories] = await db.execute('SELECT COUNT(*) as count FROM categories');
-  
-  if (categories[0].count === 0) {
-    const initialCategories = [
-      ['Phone Safety', '📱', 'Learn to stay safe when using phones and getting calls', 10],
-      ['Password Safety', '🔐', 'Keep your passwords secret and secure', 8],
-      ['Safe Clicking', '🖱️', 'Know what links are safe to click', 12],
-      ['Stranger Danger Online', '👤', 'Recognize and avoid online strangers', 15]
-    ];
-    
-    for (const category of initialCategories) {
-      await db.execute(
-        'INSERT INTO categories (name, icon, description, total_questions) VALUES (?, ?, ?, ?)',
-        category
-      );
-    }
-    
-    console.log('Initial categories seeded');
-    await seedSampleQuestions();
-  }
-}
-
-// Seed sample questions
-async function seedSampleQuestions() {
-  const sampleQuestions = [
-    // Phone Safety Questions
-    {
-      category_id: 1,
-      question_text: "Someone calls asking for the numbers mom just got. What should you do?",
-      question_type: "multiple_choice",
-      options: JSON.stringify([
-        { id: "a", text: "Give them the numbers", icon: "📞" },
-        { id: "b", text: "Tell mom about the call", icon: "👩" },
-        { id: "c", text: "Hang up and ignore", icon: "🔇" }
-      ]),
-      correct_answer: "b",
-      explanation: "Never give codes to strangers on the phone! Always ask a grown-up first.",
-      difficulty_level: "easy",
-      points: 10
-    },
-    {
-      category_id: 1,
-      question_text: "Is it safe to answer calls from numbers you don't know?",
-      question_type: "true_false",
-      options: JSON.stringify([
-        { id: "true", text: "Yes, it's always safe", icon: "✅" },
-        { id: "false", text: "No, ask a grown-up first", icon: "❌" }
-      ]),
-      correct_answer: "false",
-      explanation: "Unknown numbers might be strangers. Always let a grown-up answer first!",
-      difficulty_level: "easy",
-      points: 10
-    },
-    
-    // Password Safety Questions
-    {
-      category_id: 2,
-      question_text: "Your friend wants to know your tablet password. What do you do?",
-      question_type: "multiple_choice",
-      options: JSON.stringify([
-        { id: "a", text: "Share it - friends are trusted", icon: "👥" },
-        { id: "b", text: "Keep it secret", icon: "🔒" },
-        { id: "c", text: "Ask mom or dad first", icon: "👨‍👩‍👧‍👦" }
-      ]),
-      correct_answer: "b",
-      explanation: "Passwords should always stay secret, even from friends! Ask a grown-up to help set up safe sharing.",
-      difficulty_level: "easy",
-      points: 10
-    },
-    
-    // Safe Clicking Questions
-    {
-      category_id: 3,
-      question_text: "You see a popup saying 'You Won $1000! Click Here!' What do you do?",
-      question_type: "multiple_choice",
-      options: JSON.stringify([
-        { id: "a", text: "Click it quickly!", icon: "💰" },
-        { id: "b", text: "Close it and tell an adult", icon: "👨‍👩‍👧‍👦" },
-        { id: "c", text: "Share it with friends first", icon: "👥" }
-      ]),
-      correct_answer: "b",
-      explanation: "Popups like this are tricks! Close them and always tell a grown-up about strange messages.",
-      difficulty_level: "easy",
-      points: 10
-    },
-    
-    // Stranger Danger Questions
-    {
-      category_id: 4,
-      question_text: "Someone online asks for your home address. What should you do?",
-      question_type: "true_false",
-      options: JSON.stringify([
-        { id: "true", text: "Share it if they seem nice", icon: "😊" },
-        { id: "false", text: "Never share personal information", icon: "🚫" }
-      ]),
-      correct_answer: "false",
-      explanation: "Never share your address, phone number, or school name with strangers online!",
-      difficulty_level: "easy",
-      points: 10
-    }
-  ];
-  
-  for (const question of sampleQuestions) {
-    await db.execute(
-      `INSERT INTO questions (category_id, question_text, question_type, options, correct_answer, explanation, difficulty_level, points) 
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [
-        question.category_id,
-        question.question_text,
-        question.question_type,
-        question.options,
-        question.correct_answer,
-        question.explanation,
-        question.difficulty_level,
-        question.points
-      ]
-    );
-  }
-  
-  console.log('Sample questions seeded');
-}
+// ===============================
+// UTILITY FUNCTIONS
+// ===============================
 
 // Adaptive Learning Algorithm
-function determineNextQuestion(recentAnswers, categoryQuestions) {
-  if (!recentAnswers || recentAnswers.length === 0) {
-    // First question - start with easy multiple choice
-    return categoryQuestions.find(q => 
-      q.difficulty_level === 'easy' && q.question_type === 'multiple_choice'
-    ) || categoryQuestions[0];
-  }
-  
-  const lastFive = recentAnswers.slice(-5);
-  const correctCount = lastFive.filter(a => a.correct).length;
-  
-  // If struggling (less than 2 out of 5 correct)
-  if (correctCount < 2) {
-    // Switch to visual or easier questions
-    const visualQuestions = categoryQuestions.filter(q => 
-      q.question_type === 'visual' && q.difficulty_level === 'easy'
-    );
-    
-    if (visualQuestions.length > 0) {
-      return visualQuestions[Math.floor(Math.random() * visualQuestions.length)];
+async function getAdaptiveQuestion(userId, categoryId) {
+    try {
+        // Get user's performance by question type
+        const [performance] = await db.execute(`
+            SELECT qt.id, qt.type_name, 
+                   COALESCE(utqp.success_rate, 0) as success_rate,
+                   COALESCE(utqp.total_attempts, 0) as total_attempts
+            FROM question_types qt
+            LEFT JOIN user_question_type_performance utqp 
+                ON qt.id = utqp.question_type_id AND utqp.user_id = ?
+            ORDER BY utqp.success_rate ASC, utqp.total_attempts ASC
+        `, [userId]);
+
+        // Find the question type the user struggles with most
+        let targetQuestionTypeId = performance[0]?.id || 1;
+        
+        // If user has low success rate (< 60%) on any type, prioritize easier formats
+        const strugglingType = performance.find(p => p.success_rate < 60 && p.total_attempts >= 3);
+        if (strugglingType) {
+            // Switch to visual or easier question types
+            const [easierTypes] = await db.execute(`
+                SELECT id FROM question_types 
+                WHERE difficulty_level = 'easy' AND type_name IN ('visual_choice', 'true_false')
+                ORDER BY RAND() LIMIT 1
+            `);
+            if (easierTypes.length > 0) {
+                targetQuestionTypeId = easierTypes[0].id;
+            }
+        }
+
+        // Get a question the user hasn't answered yet
+        const [questions] = await db.execute(`
+            SELECT q.*, qt.type_name 
+            FROM questions q
+            JOIN question_types qt ON q.question_type_id = qt.id
+            WHERE q.category_id = ? 
+            AND q.question_type_id = ?
+            AND q.is_active = true
+            AND q.id NOT IN (
+                SELECT question_id FROM question_attempts WHERE user_id = ?
+            )
+            ORDER BY RAND() 
+            LIMIT 1
+        `, [categoryId, targetQuestionTypeId, userId]);
+
+        if (questions.length === 0) {
+            // If no new questions of preferred type, get any unanswered question
+            const [fallbackQuestions] = await db.execute(`
+                SELECT q.*, qt.type_name 
+                FROM questions q
+                JOIN question_types qt ON q.question_type_id = qt.id
+                WHERE q.category_id = ? 
+                AND q.is_active = true
+                AND q.id NOT IN (
+                    SELECT question_id FROM question_attempts WHERE user_id = ?
+                )
+                ORDER BY RAND() 
+                LIMIT 1
+            `, [categoryId, userId]);
+            
+            return fallbackQuestions[0] || null;
+        }
+
+        return questions[0];
+    } catch (error) {
+        console.error('Error in adaptive question selection:', error);
+        throw error;
     }
-    
-    // Fall back to easy multiple choice
-    const easyMC = categoryQuestions.filter(q => 
-      q.question_type === 'multiple_choice' && q.difficulty_level === 'easy'
-    );
-    
-    return easyMC[Math.floor(Math.random() * easyMC.length)] || categoryQuestions[0];
-  }
-  
-  // If doing well (4+ out of 5 correct)
-  if (correctCount >= 4) {
-    // Increase difficulty
-    const harderQuestions = categoryQuestions.filter(q => 
-      q.difficulty_level === 'medium' || q.difficulty_level === 'hard'
-    );
-    
-    if (harderQuestions.length > 0) {
-      return harderQuestions[Math.floor(Math.random() * harderQuestions.length)];
-    }
-  }
-  
-  // Normal progression - random question
-  return categoryQuestions[Math.floor(Math.random() * categoryQuestions.length)];
 }
 
-// API Routes
+// Badge checking function
+async function checkAndAwardBadges(userId) {
+    try {
+        const newBadges = [];
+        
+        // Get user stats
+        const [userStats] = await db.execute(`
+            SELECT total_points, current_streak 
+            FROM users WHERE id = ?
+        `, [userId]);
+        
+        if (userStats.length === 0) return [];
+        
+        const { total_points, current_streak } = userStats[0];
 
-// Create new user
-app.post('/api/users', async (req, res) => {
-  try {
-    const { name } = req.body;
-    
-    if (!name || name.trim() === '') {
-      return res.status(400).json({ error: 'Name is required' });
+        // Check all badges
+        const [badges] = await db.execute(`
+            SELECT * FROM badges 
+            WHERE id NOT IN (
+                SELECT badge_id FROM user_badges WHERE user_id = ?
+            )
+        `, [userId]);
+
+        for (const badge of badges) {
+            let shouldAward = false;
+
+            switch (badge.requirement_type) {
+                case 'points':
+                    shouldAward = total_points >= badge.requirement_value;
+                    break;
+                
+                case 'streak':
+                    shouldAward = current_streak >= badge.requirement_value;
+                    break;
+                
+                case 'questions_answered':
+                    const [questionCount] = await db.execute(`
+                        SELECT COUNT(*) as count FROM question_attempts WHERE user_id = ?
+                    `, [userId]);
+                    shouldAward = questionCount[0].count >= badge.requirement_value;
+                    break;
+                
+                case 'category_complete':
+                    if (badge.category_id) {
+                        const [progress] = await db.execute(`
+                            SELECT is_completed FROM user_progress 
+                            WHERE user_id = ? AND category_id = ?
+                        `, [userId, badge.category_id]);
+                        shouldAward = progress.length > 0 && progress[0].is_completed;
+                    }
+                    break;
+            }
+
+            if (shouldAward) {
+                await db.execute(`
+                    INSERT INTO user_badges (user_id, badge_id) VALUES (?, ?)
+                `, [userId, badge.id]);
+                newBadges.push(badge);
+            }
+        }
+
+        return newBadges;
+    } catch (error) {
+        console.error('Error checking badges:', error);
+        return [];
     }
-    
-    const [result] = await db.execute(
-      'INSERT INTO users (name, total_points, badges_earned) VALUES (?, 0, ?)',
-      [name.trim(), JSON.stringify([])]
-    );
-    
-    res.status(201).json({
-      success: true,
-      user: {
-        id: result.insertId,
-        name: name.trim(),
-        total_points: 0,
-        badges_earned: []
-      }
-    });
-    
-  } catch (error) {
-    console.error('Error creating user:', error);
-    res.status(500).json({ error: 'Failed to create user' });
-  }
+}
+
+// ===============================
+// API ROUTES
+// ===============================
+
+// Health check
+app.get('/health', (req, res) => {
+    res.json({ status: 'OK', timestamp: new Date().toISOString() });
+});
+
+// ===============================
+// USER MANAGEMENT
+// ===============================
+
+// Create or get user
+app.post('/api/users', async (req, res) => {
+    try {
+        const { name } = req.body;
+        
+        if (!name || name.trim().length === 0) {
+            return res.status(400).json({ error: 'Name is required' });
+        }
+
+        // Check if user exists
+        const [existingUsers] = await db.execute(`
+            SELECT * FROM users WHERE name = ?
+        `, [name.trim()]);
+
+        if (existingUsers.length > 0) {
+            // Update last_active
+            await db.execute(`
+                UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?
+            `, [existingUsers[0].id]);
+            
+            return res.json({ 
+                message: 'Welcome back!', 
+                user: existingUsers[0] 
+            });
+        }
+
+        // Create new user
+        const [result] = await db.execute(`
+            INSERT INTO users (name) VALUES (?)
+        `, [name.trim()]);
+
+        const [newUser] = await db.execute(`
+            SELECT * FROM users WHERE id = ?
+        `, [result.insertId]);
+
+        res.status(201).json({ 
+            message: 'User created successfully', 
+            user: newUser[0] 
+        });
+    } catch (error) {
+        console.error('Error creating user:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
 // Get user profile
-app.get('/api/users/:id', async (req, res) => {
-  try {
-    const userId = req.params.id;
-    
-    const [users] = await db.execute(
-      'SELECT * FROM users WHERE id = ?',
-      [userId]
-    );
-    
-    if (users.length === 0) {
-      return res.status(404).json({ error: 'User not found' });
+app.get('/api/users/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const [users] = await db.execute(`
+            SELECT * FROM users WHERE id = ?
+        `, [userId]);
+
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        res.json({ user: users[0] });
+    } catch (error) {
+        console.error('Error fetching user:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
-    
-    const user = users[0];
-    user.badges_earned = JSON.parse(user.badges_earned || '[]');
-    
-    res.json({ success: true, user });
-    
-  } catch (error) {
-    console.error('Error fetching user:', error);
-    res.status(500).json({ error: 'Failed to fetch user' });
-  }
 });
 
-// Get categories with progress
-app.get('/api/categories/:userId?', async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    
-    let query = `
-      SELECT c.*, 
-             COALESCE(up.progress_percentage, 0) as progress_percentage,
-             COALESCE(up.questions_answered, 0) as questions_answered,
-             COALESCE(up.current_streak, 0) as current_streak
-      FROM categories c
-      LEFT JOIN user_progress up ON c.id = up.category_id AND up.user_id = ?
-      ORDER BY c.id
-    `;
-    
-    const [categories] = await db.execute(query, [userId || 0]);
-    
-    res.json({ success: true, categories });
-    
-  } catch (error) {
-    console.error('Error fetching categories:', error);
-    res.status(500).json({ error: 'Failed to fetch categories' });
-  }
+// ===============================
+// CATEGORIES
+// ===============================
+
+// Get all categories with progress
+app.get('/api/categories/:userId', async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const [categories] = await db.execute(`
+            SELECT c.*, 
+                   COALESCE(up.questions_answered, 0) as questions_answered,
+                   COALESCE(up.correct_answers, 0) as correct_answers,
+                   COALESCE(up.points_earned, 0) as points_earned,
+                   COALESCE(up.is_completed, false) as is_completed,
+                   c.total_questions
+            FROM categories c
+            LEFT JOIN user_progress up ON c.id = up.category_id AND up.user_id = ?
+            ORDER BY c.id
+        `, [userId]);
+
+        res.json({ categories });
+    } catch (error) {
+        console.error('Error fetching categories:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
+
+// ===============================
+// QUESTIONS & QUIZ
+// ===============================
 
 // Get adaptive question for category
-app.get('/api/questions/:categoryId/:userId', async (req, res) => {
-  try {
-    const { categoryId, userId } = req.params;
-    
-    // Get all questions for the category
-    const [questions] = await db.execute(
-      'SELECT * FROM questions WHERE category_id = ?',
-      [categoryId]
-    );
-    
-    if (questions.length === 0) {
-      return res.status(404).json({ error: 'No questions found for this category' });
+app.get('/api/questions/:userId/:categoryId', async (req, res) => {
+    try {
+        const { userId, categoryId } = req.params;
+        
+        const question = await getAdaptiveQuestion(userId, categoryId);
+        
+        if (!question) {
+            return res.json({ 
+                message: 'No more questions available', 
+                question: null 
+            });
+        }
+
+        // Get answer options
+        const [options] = await db.execute(`
+            SELECT id, option_text, icon, image_url, order_position
+            FROM answer_options 
+            WHERE question_id = ? 
+            ORDER BY order_position
+        `, [question.id]);
+
+        question.options = options;
+
+        res.json({ question });
+    } catch (error) {
+        console.error('Error fetching question:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
-    
-    // Get user's recent answers for adaptive learning
-    const [progress] = await db.execute(
-      'SELECT last_5_answers FROM user_progress WHERE user_id = ? AND category_id = ?',
-      [userId, categoryId]
-    );
-    
-    const recentAnswers = progress[0]?.last_5_answers ? 
-      JSON.parse(progress[0].last_5_answers) : [];
-    
-    // Use adaptive algorithm to select next question
-    const nextQuestion = determineNextQuestion(recentAnswers, questions);
-    
-    // Parse options JSON
-    nextQuestion.options = JSON.parse(nextQuestion.options);
-    
-    res.json({ success: true, question: nextQuestion });
-    
-  } catch (error) {
-    console.error('Error fetching question:', error);
-    res.status(500).json({ error: 'Failed to fetch question' });
-  }
 });
 
 // Submit answer
-app.post('/api/quiz/answer', async (req, res) => {
-  try {
-    const { userId, questionId, categoryId, selectedAnswer } = req.body;
-    
-    // Get question details
-    const [questions] = await db.execute(
-      'SELECT * FROM questions WHERE id = ?',
-      [questionId]
-    );
-    
-    if (questions.length === 0) {
-      return res.status(404).json({ error: 'Question not found' });
+app.post('/api/answers', async (req, res) => {
+    try {
+        const { 
+            userId, 
+            questionId, 
+            selectedAnswerId, 
+            timeTaken, 
+            hintUsed = false 
+        } = req.body;
+
+        // Get question details
+        const [questions] = await db.execute(`
+            SELECT q.*, ao.is_correct, qt.type_name
+            FROM questions q
+            JOIN answer_options ao ON ao.question_id = q.id
+            JOIN question_types qt ON q.question_type_id = qt.id
+            WHERE q.id = ? AND ao.id = ?
+        `, [questionId, selectedAnswerId]);
+
+        if (questions.length === 0) {
+            return res.status(400).json({ error: 'Invalid question or answer' });
+        }
+
+        const question = questions[0];
+        const isCorrect = question.is_correct;
+        const pointsEarned = isCorrect ? question.points : 0;
+
+        // Record the attempt
+        await db.execute(`
+            INSERT INTO question_attempts 
+            (user_id, question_id, question_type_id, selected_answer_id, is_correct, time_taken, hint_used)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+        `, [userId, questionId, question.question_type_id, selectedAnswerId, isCorrect, timeTaken, hintUsed]);
+
+        // Update user stats
+        if (isCorrect) {
+            await db.execute(`
+                UPDATE users 
+                SET total_points = total_points + ?, 
+                    current_streak = current_streak + 1,
+                    best_streak = GREATEST(best_streak, current_streak + 1)
+                WHERE id = ?
+            `, [pointsEarned, userId]);
+        } else {
+            await db.execute(`
+                UPDATE users SET current_streak = 0 WHERE id = ?
+            `, [userId]);
+        }
+
+        // Update user progress for category
+        await db.execute(`
+            INSERT INTO user_progress (user_id, category_id, questions_answered, correct_answers, points_earned)
+            VALUES (?, ?, 1, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                questions_answered = questions_answered + 1,
+                correct_answers = correct_answers + ?,
+                points_earned = points_earned + ?
+        `, [userId, question.category_id, isCorrect ? 1 : 0, pointsEarned, isCorrect ? 1 : 0, pointsEarned]);
+
+        // Update question type performance for adaptive learning
+        await db.execute(`
+            INSERT INTO user_question_type_performance 
+            (user_id, question_type_id, total_attempts, correct_attempts, avg_time_taken)
+            VALUES (?, ?, 1, ?, ?)
+            ON DUPLICATE KEY UPDATE
+                total_attempts = total_attempts + 1,
+                correct_attempts = correct_attempts + ?,
+                success_rate = (correct_attempts + ?) / (total_attempts + 1) * 100,
+                avg_time_taken = ((avg_time_taken * total_attempts) + ?) / (total_attempts + 1)
+        `, [
+            userId, question.question_type_id, isCorrect ? 1 : 0, timeTaken,
+            isCorrect ? 1 : 0, isCorrect ? 1 : 0, timeTaken
+        ]);
+
+        // Check for new badges
+        const newBadges = await checkAndAwardBadges(userId);
+
+        // Get correct answer for explanation
+        const [correctAnswer] = await db.execute(`
+            SELECT option_text FROM answer_options 
+            WHERE question_id = ? AND is_correct = true
+        `, [questionId]);
+
+        res.json({
+            isCorrect,
+            pointsEarned,
+            explanation: question.explanation,
+            correctAnswer: correctAnswer[0]?.option_text || '',
+            newBadges
+        });
+    } catch (error) {
+        console.error('Error submitting answer:', error);
+        res.status(500).json({ error: 'Internal server error' });
     }
-    
-    const question = questions[0];
-    const isCorrect = selectedAnswer === question.correct_answer;
-    const pointsEarned = isCorrect ? question.points : 0;
-    
-    // Update user progress
-    await db.execute(
-      `INSERT INTO user_progress (user_id, category_id, questions_answered, questions_correct, last_5_answers)
-       VALUES (?, ?, 1, ?, ?)
-       ON DUPLICATE KEY UPDATE
-       questions_answered = questions_answered + 1,
-       questions_correct = questions_correct + ?,
-       current_streak = CASE WHEN ? THEN current_streak + 1 ELSE 0 END,
-       best_streak = GREATEST(best_streak, CASE WHEN ? THEN current_streak + 1 ELSE current_streak END),
-       last_5_answers = JSON_ARRAY_APPEND(
-         CASE 
-           WHEN JSON_LENGTH(COALESCE(last_5_answers, '[]')) >= 5 
-           THEN JSON_REMOVE(last_5_answers, '$[0]')
-           ELSE COALESCE(last_5_answers, '[]')
-         END,
-         '$',
-         JSON_OBJECT('questionId', ?, 'correct', ?, 'timestamp', NOW())
-       ),
-       progress_percentage = (questions_correct / questions_answered) * 100,
-       updated_at = CURRENT_TIMESTAMP`,
-      [
-        userId, categoryId, isCorrect ? 1 : 0, 
-        JSON.stringify([{ questionId, correct: isCorrect, timestamp: new Date() }]),
-        isCorrect ? 1 : 0, isCorrect, isCorrect,
-        questionId, isCorrect
-      ]
-    );
-    
-    // Update user total points
-    if (isCorrect) {
-      await db.execute(
-        'UPDATE users SET total_points = total_points + ? WHERE id = ?',
-        [pointsEarned, userId]
-      );
-    }
-    
-    // Get current streak for response
-    const [progress] = await db.execute(
-      'SELECT current_streak FROM user_progress WHERE user_id = ? AND category_id = ?',
-      [userId, categoryId]
-    );
-    
-    res.json({
-      success: true,
-      correct: isCorrect,
-      explanation: question.explanation,
-      points_earned: pointsEarned,
-      current_streak: progress[0]?.current_streak || 0
-    });
-    
-  } catch (error) {
-    console.error('Error submitting answer:', error);
-    res.status(500).json({ error: 'Failed to submit answer' });
-  }
 });
 
-// Get user progress
+// ===============================
+// PROGRESS & ACHIEVEMENTS
+// ===============================
+
+// Get user progress dashboard
 app.get('/api/progress/:userId', async (req, res) => {
-  try {
-    const userId = req.params.userId;
-    
-    const [progress] = await db.execute(`
-      SELECT up.*, c.name as category_name, c.icon as category_icon
-      FROM user_progress up
-      JOIN categories c ON up.category_id = c.id
-      WHERE up.user_id = ?
-      ORDER BY c.id
-    `, [userId]);
-    
-    res.json({ success: true, progress });
-    
-  } catch (error) {
-    console.error('Error fetching progress:', error);
-    res.status(500).json({ error: 'Failed to fetch progress' });
-  }
+    try {
+        const { userId } = req.params;
+        
+        // Get user stats
+        const [userStats] = await db.execute(`
+            SELECT * FROM users WHERE id = ?
+        `, [userId]);
+
+        if (userStats.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+
+        // Get category progress
+        const [categoryProgress] = await db.execute(`
+            SELECT c.name, c.icon, c.total_questions,
+                   COALESCE(up.questions_answered, 0) as questions_answered,
+                   COALESCE(up.correct_answers, 0) as correct_answers,
+                   COALESCE(up.points_earned, 0) as points_earned,
+                   COALESCE(up.is_completed, false) as is_completed
+            FROM categories c
+            LEFT JOIN user_progress up ON c.id = up.category_id AND up.user_id = ?
+            ORDER BY c.id
+        `, [userId]);
+
+        // Get earned badges
+        const [earnedBadges] = await db.execute(`
+            SELECT b.*, ub.earned_at
+            FROM badges b
+            JOIN user_badges ub ON b.id = ub.badge_id
+            WHERE ub.user_id = ?
+            ORDER BY ub.earned_at DESC
+        `, [userId]);
+
+        // Get all badges for progress tracking
+        const [allBadges] = await db.execute(`
+            SELECT * FROM badges ORDER BY requirement_value
+        `, []);
+
+        res.json({
+            user: userStats[0],
+            categoryProgress,
+            earnedBadges,
+            allBadges
+        });
+    } catch (error) {
+        console.error('Error fetching progress:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'OK', timestamp: new Date().toISOString() });
+// Get leaderboard (top users by points)
+app.get('/api/leaderboard', async (req, res) => {
+    try {
+        const [topUsers] = await db.execute(`
+            SELECT name, total_points, best_streak,
+                   (SELECT COUNT(*) FROM user_badges WHERE user_id = users.id) as badge_count
+            FROM users 
+            WHERE total_points > 0
+            ORDER BY total_points DESC, best_streak DESC
+            LIMIT 10
+        `);
+
+        res.json({ leaderboard: topUsers });
+    } catch (error) {
+        console.error('Error fetching leaderboard:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
 });
 
-// Error handling middleware
+// ===============================
+// ADMIN ENDPOINTS (Optional)
+// ===============================
+
+// Add new question (for future content updates)
+app.post('/api/admin/questions', async (req, res) => {
+    try {
+        const {
+            categoryId,
+            questionTypeId,
+            questionText,
+            explanation,
+            hintText,
+            points = 10,
+            options = []
+        } = req.body;
+
+        // Insert question
+        const [questionResult] = await db.execute(`
+            INSERT INTO questions (category_id, question_type_id, question_text, explanation, hint_text, points)
+            VALUES (?, ?, ?, ?, ?, ?)
+        `, [categoryId, questionTypeId, questionText, explanation, hintText, points]);
+
+        const questionId = questionResult.insertId;
+
+        // Insert answer options
+        for (let i = 0; i < options.length; i++) {
+            const option = options[i];
+            await db.execute(`
+                INSERT INTO answer_options (question_id, option_text, icon, is_correct, order_position)
+                VALUES (?, ?, ?, ?, ?)
+            `, [questionId, option.text, option.icon || '', option.isCorrect || false, i + 1]);
+        }
+
+        res.status(201).json({ 
+            message: 'Question created successfully', 
+            questionId 
+        });
+    } catch (error) {
+        console.error('Error creating question:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    }
+});
+
+// ===============================
+// ERROR HANDLING & SERVER START
+// ===============================
+
+// Global error handler
 app.use((error, req, res, next) => {
-  console.error('Unhandled error:', error);
-  res.status(500).json({ error: 'Internal server error' });
+    console.error('Unhandled error:', error);
+    res.status(500).json({ error: 'Internal server error' });
+});
+
+// Handle 404
+app.use('*', (req, res) => {
+    res.status(404).json({ error: 'Endpoint not found' });
 });
 
 // Start server
-async function startServer() {
-  await initializeDatabase();
-  
-  app.listen(PORT, () => {
-    console.log(`Server running on port ${PORT}`);
-    console.log(`Health check: http://localhost:${PORT}/api/health`);
-  });
-}
-
-startServer().catch(error => {
-  console.error('Failed to start server:', error);
-  process.exit(1);
+app.listen(PORT, () => {
+    console.log(`🚀 Kids Cybersecurity Quiz API running on port ${PORT}`);
+    console.log(`📊 Health check: http://localhost:${PORT}/health`);
 });
+
+module.exports = app;
