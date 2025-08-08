@@ -1,0 +1,43 @@
+# Node.js dependencies
+node_modules/
+npm-debug.log
+yarn-error.log
+
+# Environment variables (never commit these)
+.env
+.env.production
+.env.local
+.env.*.local
+
+# Logs
+logs
+*.log
+debug.log
+error.log
+out.log
+
+# OS-specific files
+.DS_Store
+Thumbs.db
+
+# Temporary files
+*.tmp
+*.swp
+
+# Build output
+dist/
+build/
+
+# Railway generated files
+.railway
+
+# Coverage reports
+coverage/
+
+# IDE/editor settings
+.vscode/
+.idea/
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
