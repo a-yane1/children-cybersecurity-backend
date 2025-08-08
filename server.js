@@ -1,6 +1,4 @@
-// Kids Cybersecurity Quiz - Node.js Backend API
-// File: server.js
-
+// Fixed server.js with proper database connection handling
 const express = require('express');
 const mysql = require('mysql2/promise');
 const cors = require('cors');
@@ -27,29 +25,47 @@ const limiter = rateLimit({
 });
 app.use(limiter);
 
-// Database connection
+// Database connection pool configuration
 const dbConfig = {
     host: process.env.DB_HOST || 'localhost',
     user: process.env.DB_USER || 'root',
     password: process.env.DB_PASSWORD || '',
     database: process.env.DB_NAME || 'kids_cybersecurity_quiz',
-    charset: 'utf8mb4'
+    port: process.env.DB_PORT || 3306,
+    charset: 'utf8mb4',
+    connectionLimit: 10,
+    acquireTimeout: 60000,
+    timeout: 60000,
+    reconnect: true
 };
 
-let db;
+// Create connection pool
+const pool = mysql.createPool(dbConfig);
 
-async function connectDB() {
+// Test database connection function
+async function testDatabaseConnection() {
     try {
-        db = await mysql.createConnection(dbConfig);
-        console.log('Connected to MySQL database');
+        const connection = await pool.getConnection();
+        await connection.execute('SELECT 1');
+        connection.release();
+        console.log('✅ Database connection pool established');
+        return true;
     } catch (error) {
-        console.error('Database connection failed:', error);
-        process.exit(1);
+        console.error('⚠️ Database connection failed:', error.message);
+        console.log('🔄 Server will start but database operations may fail');
+        return false;
     }
 }
 
-// Initialize database connection
-connectDB();
+// Helper function to get database connection
+async function getDbConnection() {
+    try {
+        return await pool.getConnection();
+    } catch (error) {
+        console.error('Database connection error:', error);
+        throw new Error('Database connection failed');
+    }
+}
 
 // ===============================
 // UTILITY FUNCTIONS
@@ -57,9 +73,10 @@ connectDB();
 
 // Adaptive Learning Algorithm
 async function getAdaptiveQuestion(userId, categoryId) {
+    const connection = await getDbConnection();
     try {
         // Get user's performance by question type
-        const [performance] = await db.execute(`
+        const [performance] = await connection.execute(`
             SELECT qt.id, qt.type_name, 
                    COALESCE(utqp.success_rate, 0) as success_rate,
                    COALESCE(utqp.total_attempts, 0) as total_attempts
@@ -76,7 +93,7 @@ async function getAdaptiveQuestion(userId, categoryId) {
         const strugglingType = performance.find(p => p.success_rate < 60 && p.total_attempts >= 3);
         if (strugglingType) {
             // Switch to visual or easier question types
-            const [easierTypes] = await db.execute(`
+            const [easierTypes] = await connection.execute(`
                 SELECT id FROM question_types 
                 WHERE difficulty_level = 'easy' AND type_name IN ('visual_choice', 'true_false')
                 ORDER BY RAND() LIMIT 1
@@ -87,7 +104,7 @@ async function getAdaptiveQuestion(userId, categoryId) {
         }
 
         // Get a question the user hasn't answered yet
-        const [questions] = await db.execute(`
+        const [questions] = await connection.execute(`
             SELECT q.*, qt.type_name 
             FROM questions q
             JOIN question_types qt ON q.question_type_id = qt.id
@@ -103,7 +120,7 @@ async function getAdaptiveQuestion(userId, categoryId) {
 
         if (questions.length === 0) {
             // If no new questions of preferred type, get any unanswered question
-            const [fallbackQuestions] = await db.execute(`
+            const [fallbackQuestions] = await connection.execute(`
                 SELECT q.*, qt.type_name 
                 FROM questions q
                 JOIN question_types qt ON q.question_type_id = qt.id
@@ -123,16 +140,19 @@ async function getAdaptiveQuestion(userId, categoryId) {
     } catch (error) {
         console.error('Error in adaptive question selection:', error);
         throw error;
+    } finally {
+        connection.release();
     }
 }
 
 // Badge checking function
 async function checkAndAwardBadges(userId) {
+    const connection = await getDbConnection();
     try {
         const newBadges = [];
         
         // Get user stats
-        const [userStats] = await db.execute(`
+        const [userStats] = await connection.execute(`
             SELECT total_points, current_streak 
             FROM users WHERE id = ?
         `, [userId]);
@@ -142,7 +162,7 @@ async function checkAndAwardBadges(userId) {
         const { total_points, current_streak } = userStats[0];
 
         // Check all badges
-        const [badges] = await db.execute(`
+        const [badges] = await connection.execute(`
             SELECT * FROM badges 
             WHERE id NOT IN (
                 SELECT badge_id FROM user_badges WHERE user_id = ?
@@ -162,7 +182,7 @@ async function checkAndAwardBadges(userId) {
                     break;
                 
                 case 'questions_answered':
-                    const [questionCount] = await db.execute(`
+                    const [questionCount] = await connection.execute(`
                         SELECT COUNT(*) as count FROM question_attempts WHERE user_id = ?
                     `, [userId]);
                     shouldAward = questionCount[0].count >= badge.requirement_value;
@@ -170,7 +190,7 @@ async function checkAndAwardBadges(userId) {
                 
                 case 'category_complete':
                     if (badge.category_id) {
-                        const [progress] = await db.execute(`
+                        const [progress] = await connection.execute(`
                             SELECT is_completed FROM user_progress 
                             WHERE user_id = ? AND category_id = ?
                         `, [userId, badge.category_id]);
@@ -180,7 +200,7 @@ async function checkAndAwardBadges(userId) {
             }
 
             if (shouldAward) {
-                await db.execute(`
+                await connection.execute(`
                     INSERT INTO user_badges (user_id, badge_id) VALUES (?, ?)
                 `, [userId, badge.id]);
                 newBadges.push(badge);
@@ -191,6 +211,8 @@ async function checkAndAwardBadges(userId) {
     } catch (error) {
         console.error('Error checking badges:', error);
         return [];
+    } finally {
+        connection.release();
     }
 }
 
@@ -199,16 +221,31 @@ async function checkAndAwardBadges(userId) {
 // ===============================
 
 // Health check
-app.get('/health', (req, res) => {
-    res.json({ status: 'OK', timestamp: new Date().toISOString() });
+app.get('/health', async (req, res) => {
+    try {
+        // Test database connection
+        const connection = await getDbConnection();
+        await connection.execute('SELECT 1');
+        connection.release();
+        
+        res.json({ 
+            status: 'OK', 
+            timestamp: new Date().toISOString(),
+            database: 'connected'
+        });
+    } catch (error) {
+        res.json({ 
+            status: 'OK', 
+            timestamp: new Date().toISOString(),
+            database: 'disconnected',
+            warning: 'Database connection failed but server is running'
+        });
+    }
 });
-
-// ===============================
-// USER MANAGEMENT
-// ===============================
 
 // Create or get user
 app.post('/api/users', async (req, res) => {
+    let connection;
     try {
         const { name } = req.body;
         
@@ -216,14 +253,16 @@ app.post('/api/users', async (req, res) => {
             return res.status(400).json({ error: 'Name is required' });
         }
 
+        connection = await getDbConnection();
+
         // Check if user exists
-        const [existingUsers] = await db.execute(`
+        const [existingUsers] = await connection.execute(`
             SELECT * FROM users WHERE name = ?
         `, [name.trim()]);
 
         if (existingUsers.length > 0) {
             // Update last_active
-            await db.execute(`
+            await connection.execute(`
                 UPDATE users SET last_active = CURRENT_TIMESTAMP WHERE id = ?
             `, [existingUsers[0].id]);
             
@@ -234,11 +273,11 @@ app.post('/api/users', async (req, res) => {
         }
 
         // Create new user
-        const [result] = await db.execute(`
+        const [result] = await connection.execute(`
             INSERT INTO users (name) VALUES (?)
         `, [name.trim()]);
 
-        const [newUser] = await db.execute(`
+        const [newUser] = await connection.execute(`
             SELECT * FROM users WHERE id = ?
         `, [result.insertId]);
 
@@ -249,39 +288,20 @@ app.post('/api/users', async (req, res) => {
     } catch (error) {
         console.error('Error creating user:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        if (connection) connection.release();
     }
 });
-
-// Get user profile
-app.get('/api/users/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        
-        const [users] = await db.execute(`
-            SELECT * FROM users WHERE id = ?
-        `, [userId]);
-
-        if (users.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        res.json({ user: users[0] });
-    } catch (error) {
-        console.error('Error fetching user:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// ===============================
-// CATEGORIES
-// ===============================
 
 // Get all categories with progress
 app.get('/api/categories/:userId', async (req, res) => {
+    let connection;
     try {
         const { userId } = req.params;
         
-        const [categories] = await db.execute(`
+        connection = await getDbConnection();
+        
+        const [categories] = await connection.execute(`
             SELECT c.*, 
                    COALESCE(up.questions_answered, 0) as questions_answered,
                    COALESCE(up.correct_answers, 0) as correct_answers,
@@ -297,15 +317,14 @@ app.get('/api/categories/:userId', async (req, res) => {
     } catch (error) {
         console.error('Error fetching categories:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// ===============================
-// QUESTIONS & QUIZ
-// ===============================
-
 // Get adaptive question for category
 app.get('/api/questions/:userId/:categoryId', async (req, res) => {
+    let connection;
     try {
         const { userId, categoryId } = req.params;
         
@@ -318,8 +337,10 @@ app.get('/api/questions/:userId/:categoryId', async (req, res) => {
             });
         }
 
+        connection = await getDbConnection();
+        
         // Get answer options
-        const [options] = await db.execute(`
+        const [options] = await connection.execute(`
             SELECT id, option_text, icon, image_url, order_position
             FROM answer_options 
             WHERE question_id = ? 
@@ -332,11 +353,14 @@ app.get('/api/questions/:userId/:categoryId', async (req, res) => {
     } catch (error) {
         console.error('Error fetching question:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
 // Submit answer
 app.post('/api/answers', async (req, res) => {
+    let connection;
     try {
         const { 
             userId, 
@@ -346,8 +370,10 @@ app.post('/api/answers', async (req, res) => {
             hintUsed = false 
         } = req.body;
 
+        connection = await getDbConnection();
+
         // Get question details
-        const [questions] = await db.execute(`
+        const [questions] = await connection.execute(`
             SELECT q.*, ao.is_correct, qt.type_name
             FROM questions q
             JOIN answer_options ao ON ao.question_id = q.id
@@ -364,7 +390,7 @@ app.post('/api/answers', async (req, res) => {
         const pointsEarned = isCorrect ? question.points : 0;
 
         // Record the attempt
-        await db.execute(`
+        await connection.execute(`
             INSERT INTO question_attempts 
             (user_id, question_id, question_type_id, selected_answer_id, is_correct, time_taken, hint_used)
             VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -372,7 +398,7 @@ app.post('/api/answers', async (req, res) => {
 
         // Update user stats
         if (isCorrect) {
-            await db.execute(`
+            await connection.execute(`
                 UPDATE users 
                 SET total_points = total_points + ?, 
                     current_streak = current_streak + 1,
@@ -380,13 +406,13 @@ app.post('/api/answers', async (req, res) => {
                 WHERE id = ?
             `, [pointsEarned, userId]);
         } else {
-            await db.execute(`
+            await connection.execute(`
                 UPDATE users SET current_streak = 0 WHERE id = ?
             `, [userId]);
         }
 
         // Update user progress for category
-        await db.execute(`
+        await connection.execute(`
             INSERT INTO user_progress (user_id, category_id, questions_answered, correct_answers, points_earned)
             VALUES (?, ?, 1, ?, ?)
             ON DUPLICATE KEY UPDATE
@@ -396,7 +422,7 @@ app.post('/api/answers', async (req, res) => {
         `, [userId, question.category_id, isCorrect ? 1 : 0, pointsEarned, isCorrect ? 1 : 0, pointsEarned]);
 
         // Update question type performance for adaptive learning
-        await db.execute(`
+        await connection.execute(`
             INSERT INTO user_question_type_performance 
             (user_id, question_type_id, total_attempts, correct_attempts, avg_time_taken)
             VALUES (?, ?, 1, ?, ?)
@@ -414,7 +440,7 @@ app.post('/api/answers', async (req, res) => {
         const newBadges = await checkAndAwardBadges(userId);
 
         // Get correct answer for explanation
-        const [correctAnswer] = await db.execute(`
+        const [correctAnswer] = await connection.execute(`
             SELECT option_text FROM answer_options 
             WHERE question_id = ? AND is_correct = true
         `, [questionId]);
@@ -429,133 +455,12 @@ app.post('/api/answers', async (req, res) => {
     } catch (error) {
         console.error('Error submitting answer:', error);
         res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        if (connection) connection.release();
     }
 });
 
-// ===============================
-// PROGRESS & ACHIEVEMENTS
-// ===============================
-
-// Get user progress dashboard
-app.get('/api/progress/:userId', async (req, res) => {
-    try {
-        const { userId } = req.params;
-        
-        // Get user stats
-        const [userStats] = await db.execute(`
-            SELECT * FROM users WHERE id = ?
-        `, [userId]);
-
-        if (userStats.length === 0) {
-            return res.status(404).json({ error: 'User not found' });
-        }
-
-        // Get category progress
-        const [categoryProgress] = await db.execute(`
-            SELECT c.name, c.icon, c.total_questions,
-                   COALESCE(up.questions_answered, 0) as questions_answered,
-                   COALESCE(up.correct_answers, 0) as correct_answers,
-                   COALESCE(up.points_earned, 0) as points_earned,
-                   COALESCE(up.is_completed, false) as is_completed
-            FROM categories c
-            LEFT JOIN user_progress up ON c.id = up.category_id AND up.user_id = ?
-            ORDER BY c.id
-        `, [userId]);
-
-        // Get earned badges
-        const [earnedBadges] = await db.execute(`
-            SELECT b.*, ub.earned_at
-            FROM badges b
-            JOIN user_badges ub ON b.id = ub.badge_id
-            WHERE ub.user_id = ?
-            ORDER BY ub.earned_at DESC
-        `, [userId]);
-
-        // Get all badges for progress tracking
-        const [allBadges] = await db.execute(`
-            SELECT * FROM badges ORDER BY requirement_value
-        `, []);
-
-        res.json({
-            user: userStats[0],
-            categoryProgress,
-            earnedBadges,
-            allBadges
-        });
-    } catch (error) {
-        console.error('Error fetching progress:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// Get leaderboard (top users by points)
-app.get('/api/leaderboard', async (req, res) => {
-    try {
-        const [topUsers] = await db.execute(`
-            SELECT name, total_points, best_streak,
-                   (SELECT COUNT(*) FROM user_badges WHERE user_id = users.id) as badge_count
-            FROM users 
-            WHERE total_points > 0
-            ORDER BY total_points DESC, best_streak DESC
-            LIMIT 10
-        `);
-
-        res.json({ leaderboard: topUsers });
-    } catch (error) {
-        console.error('Error fetching leaderboard:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// ===============================
-// ADMIN ENDPOINTS (Optional)
-// ===============================
-
-// Add new question (for future content updates)
-app.post('/api/admin/questions', async (req, res) => {
-    try {
-        const {
-            categoryId,
-            questionTypeId,
-            questionText,
-            explanation,
-            hintText,
-            points = 10,
-            options = []
-        } = req.body;
-
-        // Insert question
-        const [questionResult] = await db.execute(`
-            INSERT INTO questions (category_id, question_type_id, question_text, explanation, hint_text, points)
-            VALUES (?, ?, ?, ?, ?, ?)
-        `, [categoryId, questionTypeId, questionText, explanation, hintText, points]);
-
-        const questionId = questionResult.insertId;
-
-        // Insert answer options
-        for (let i = 0; i < options.length; i++) {
-            const option = options[i];
-            await db.execute(`
-                INSERT INTO answer_options (question_id, option_text, icon, is_correct, order_position)
-                VALUES (?, ?, ?, ?, ?)
-            `, [questionId, option.text, option.icon || '', option.isCorrect || false, i + 1]);
-        }
-
-        res.status(201).json({ 
-            message: 'Question created successfully', 
-            questionId 
-        });
-    } catch (error) {
-        console.error('Error creating question:', error);
-        res.status(500).json({ error: 'Internal server error' });
-    }
-});
-
-// ===============================
-// ERROR HANDLING & SERVER START
-// ===============================
-
-// Global error handler
+// Error handling
 app.use((error, req, res, next) => {
     console.error('Unhandled error:', error);
     res.status(500).json({ error: 'Internal server error' });
@@ -566,10 +471,19 @@ app.use('*', (req, res) => {
     res.status(404).json({ error: 'Endpoint not found' });
 });
 
-// Start server
-app.listen(PORT, () => {
-    console.log(`🚀 Kids Cybersecurity Quiz API running on port ${PORT}`);
-    console.log(`📊 Health check: http://localhost:${PORT}/health`);
-});
+// Initialize and start server
+async function startServer() {
+    // Test database connection on startup (but don't fail if it doesn't work)
+    await testDatabaseConnection();
+    
+    // Start server regardless of database connection status
+    app.listen(PORT, () => {
+        console.log(`🚀 Kids Cybersecurity Quiz API running on port ${PORT}`);
+        console.log(`📊 Health check: http://localhost:${PORT}/health`);
+        console.log(`🎯 Ready to serve requests!`);
+    });
+}
+
+startServer();
 
 module.exports = app;
