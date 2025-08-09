@@ -328,6 +328,69 @@ app.get('/api/categories/:userId', async (req, res) => {
     }
 });
 
+// Get user progress dashboard
+app.get('/api/progress/:userId', async (req, res) => {
+    let connection;
+    try {
+        const { userId } = req.params;
+        
+        connection = await getDbConnection();
+        
+        // Get updated user info
+        const [users] = await connection.execute(`
+            SELECT * FROM users WHERE id = ?
+        `, [userId]);
+        
+        if (users.length === 0) {
+            return res.status(404).json({ error: 'User not found' });
+        }
+        
+        // Get category progress
+        const [categoryProgress] = await connection.execute(`
+            SELECT c.*, 
+                   COALESCE(up.questions_answered, 0) as questions_answered,
+                   COALESCE(up.correct_answers, 0) as correct_answers,
+                   COALESCE(up.points_earned, 0) as points_earned,
+                   COALESCE(up.is_completed, false) as is_completed
+            FROM categories c
+            LEFT JOIN user_progress up ON c.id = up.category_id AND up.user_id = ?
+            ORDER BY c.id
+        `, [userId]);
+        
+        // Get earned badges
+        const [earnedBadges] = await connection.execute(`
+            SELECT b.*, ub.earned_at
+            FROM badges b
+            JOIN user_badges ub ON b.id = ub.badge_id
+            WHERE ub.user_id = ?
+            ORDER BY ub.earned_at DESC
+        `, [userId]);
+        
+        // Get all badges
+        const [allBadges] = await connection.execute(`
+            SELECT b.*, 
+                   CASE WHEN ub.badge_id IS NOT NULL THEN TRUE ELSE FALSE END as is_earned,
+                   ub.earned_at
+            FROM badges b
+            LEFT JOIN user_badges ub ON b.id = ub.badge_id AND ub.user_id = ?
+            ORDER BY b.id
+        `, [userId]);
+        
+        res.json({
+            user: users[0],
+            categoryProgress,
+            earnedBadges,
+            allBadges
+        });
+        
+    } catch (error) {
+        console.error('Error fetching progress:', error);
+        res.status(500).json({ error: 'Internal server error' });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
 // Get adaptive question for category
 app.get('/api/questions/:userId/:categoryId', async (req, res) => {
     let connection;
@@ -365,6 +428,7 @@ app.get('/api/questions/:userId/:categoryId', async (req, res) => {
 });
 
 // Submit answer
+// Submit answer
 app.post('/api/answers', async (req, res) => {
     let connection;
     try {
@@ -376,24 +440,39 @@ app.post('/api/answers', async (req, res) => {
             hintUsed = false 
         } = req.body;
 
+        console.log('📝 Submit answer request:', { userId, questionId, selectedAnswerId, timeTaken });
+
         connection = await getDbConnection();
 
-        // Get question details
+        // Get question details and check if the selected answer is correct
         const [questions] = await connection.execute(`
-            SELECT q.*, ao.is_correct, qt.type_name
+            SELECT q.*, qt.type_name
             FROM questions q
-            JOIN answer_options ao ON ao.question_id = q.id
             JOIN question_types qt ON q.question_type_id = qt.id
-            WHERE q.id = ? AND ao.id = ?
-        `, [questionId, selectedAnswerId]);
+            WHERE q.id = ?
+        `, [questionId]);
 
         if (questions.length === 0) {
-            return res.status(400).json({ error: 'Invalid question or answer' });
+            console.log('❌ Question not found:', questionId);
+            return res.status(400).json({ error: 'Question not found' });
         }
 
         const question = questions[0];
-        const isCorrect = question.is_correct;
+
+        // Check if the selected answer is correct
+        const [selectedAnswer] = await connection.execute(`
+            SELECT is_correct FROM answer_options WHERE id = ?
+        `, [selectedAnswerId]);
+
+        if (selectedAnswer.length === 0) {
+            console.log('❌ Answer option not found:', selectedAnswerId);
+            return res.status(400).json({ error: 'Answer option not found' });
+        }
+
+        const isCorrect = selectedAnswer[0].is_correct === 1; // Handle MySQL boolean as int
         const pointsEarned = isCorrect ? question.points : 0;
+
+        console.log('✅ Answer check:', { isCorrect, pointsEarned });
 
         // Record the attempt
         await connection.execute(`
@@ -424,8 +503,15 @@ app.post('/api/answers', async (req, res) => {
             ON DUPLICATE KEY UPDATE
                 questions_answered = questions_answered + 1,
                 correct_answers = correct_answers + ?,
-                points_earned = points_earned + ?
-        `, [userId, question.category_id, isCorrect ? 1 : 0, pointsEarned, isCorrect ? 1 : 0, pointsEarned]);
+                points_earned = points_earned + ?,
+                is_completed = CASE 
+                    WHEN (questions_answered + 1) >= (SELECT total_questions FROM categories WHERE id = ?) 
+                    THEN 1 ELSE 0 
+                END
+        `, [
+            userId, question.category_id, isCorrect ? 1 : 0, pointsEarned,
+            isCorrect ? 1 : 0, pointsEarned, question.category_id
+        ]);
 
         // Update question type performance for adaptive learning
         await connection.execute(`
@@ -448,19 +534,22 @@ app.post('/api/answers', async (req, res) => {
         // Get correct answer for explanation
         const [correctAnswer] = await connection.execute(`
             SELECT option_text FROM answer_options 
-            WHERE question_id = ? AND is_correct = true
+            WHERE question_id = ? AND is_correct = 1
         `, [questionId]);
 
-        res.json({
+        const response = {
             isCorrect,
             pointsEarned,
-            explanation: question.explanation,
+            explanation: question.explanation || 'Great job!',
             correctAnswer: correctAnswer[0]?.option_text || '',
             newBadges
-        });
+        };
+
+        console.log('📤 Sending response:', response);
+        res.json(response);
     } catch (error) {
-        console.error('Error submitting answer:', error);
-        res.status(500).json({ error: 'Internal server error' });
+        console.error('❌ Error submitting answer:', error);
+        res.status(500).json({ error: 'Internal server error: ' + error.message });
     } finally {
         if (connection) connection.release();
     }
