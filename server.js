@@ -6,8 +6,12 @@ const helmet = require('helmet');
 const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
+// NEW CODE:
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Trust Railway proxy - ADD THIS LINE
+app.set('trust proxy', true);
 
 // Middleware
 app.use(helmet());
@@ -18,12 +22,14 @@ app.use(cors({
 }));
 app.use(express.json({ limit: '10mb' }));
 
-// Rate limiting
+// Rate limiting with proxy support
 const limiter = rateLimit({
     windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 100 // limit each IP to 100 requests per windowMs
+    max: 100,
+    trustProxy: true, // ADD THIS LINE
+    skipSuccessfulRequests: false
 });
-app.use(limiter);
+app.use(limiter);;
 
 // Database connection pool configuration
 const dbConfig = {
