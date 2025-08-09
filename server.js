@@ -16,7 +16,7 @@ app.set('trust proxy', true);
 // Middleware
 app.use(helmet());
 app.use(cors({
-    origin: process.env.FRONTEND_URL || 'http://localhost:3000',
+    origin: [process.env.FRONTEND_URL || 'http://localhost:3000','https://children-cs-awareness.web.app/', 'https://children-cs-awareness.firebaseapp.com/'],
     methods: ['GET', 'POST', 'PUT', 'DELETE'],
     allowedHeaders: ['Content-Type', 'Authorization']
 }));
@@ -550,6 +550,88 @@ app.post('/api/answers', async (req, res) => {
     } catch (error) {
         console.error('❌ Error submitting answer:', error);
         res.status(500).json({ error: 'Internal server error: ' + error.message });
+    } finally {
+        if (connection) connection.release();
+    }
+});
+
+// Reset category progress
+app.post('/api/reset-progress', async (req, res) => {
+    let connection;
+    try {
+        const { userId, categoryId } = req.body;
+        
+        if (!userId || !categoryId) {
+            return res.status(400).json({ error: 'UserId and categoryId are required' });
+        }
+
+        connection = await getDbConnection();
+
+        console.log(`Resetting progress for user ${userId}, category ${categoryId}`);
+
+        // Start transaction
+        await connection.beginTransaction();
+
+        try {
+            // Delete all question attempts for this user and category
+            await connection.execute(`
+                DELETE qa FROM question_attempts qa
+                JOIN questions q ON qa.question_id = q.id
+                WHERE qa.user_id = ? AND q.category_id = ?
+            `, [userId, categoryId]);
+
+            // Reset user progress for this category
+            await connection.execute(`
+                DELETE FROM user_progress 
+                WHERE user_id = ? AND category_id = ?
+            `, [userId, categoryId]);
+
+            // Reset question type performance for this category's questions
+            await connection.execute(`
+                UPDATE user_question_type_performance utqp
+                JOIN questions q ON q.question_type_id = utqp.question_type_id
+                SET utqp.total_attempts = GREATEST(0, utqp.total_attempts - (
+                    SELECT COUNT(*) FROM question_attempts qa2 
+                    JOIN questions q2 ON qa2.question_id = q2.id 
+                    WHERE qa2.user_id = ? AND q2.category_id = ? AND qa2.question_type_id = utqp.question_type_id
+                )),
+                utqp.correct_attempts = GREATEST(0, utqp.correct_attempts - (
+                    SELECT COUNT(*) FROM question_attempts qa3 
+                    JOIN questions q3 ON qa3.question_id = q3.id 
+                    WHERE qa3.user_id = ? AND q3.category_id = ? AND qa3.question_type_id = utqp.question_type_id AND qa3.is_correct = 1
+                ))
+                WHERE utqp.user_id = ?
+            `, [userId, categoryId, userId, categoryId, userId]);
+
+            // Recalculate user's total points
+            const [totalPoints] = await connection.execute(`
+                SELECT COALESCE(SUM(points_earned), 0) as total
+                FROM user_progress 
+                WHERE user_id = ?
+            `, [userId]);
+
+            // Update user's total points but keep streak as is
+            await connection.execute(`
+                UPDATE users 
+                SET total_points = ?
+                WHERE id = ?
+            `, [totalPoints[0].total, userId]);
+
+            // Commit transaction
+            await connection.commit();
+
+            console.log(`Successfully reset progress for user ${userId}, category ${categoryId}`);
+            res.json({ message: 'Category progress reset successfully' });
+
+        } catch (error) {
+            // Rollback transaction on error
+            await connection.rollback();
+            throw error;
+        }
+
+    } catch (error) {
+        console.error('Error resetting category progress:', error);
+        res.status(500).json({ error: 'Failed to reset progress: ' + error.message });
     } finally {
         if (connection) connection.release();
     }
