@@ -16,9 +16,12 @@ app.set('trust proxy', true);
 // Middleware
 app.use(helmet());
 app.use(cors({
-    origin: [process.env.FRONTEND_URL || 'http://localhost:3000','https://children-cs-awareness.web.app/', 'https://children-cs-awareness.firebaseapp.com/'],
-    methods: ['GET', 'POST', 'PUT', 'DELETE'],
-    allowedHeaders: ['Content-Type', 'Authorization']
+    origin: process.env.NODE_ENV === 'production' 
+        ? process.env.FRONTEND_URL 
+        : true, // Allow all origins in development
+    methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    credentials: false
 }));
 app.use(express.json({ limit: '10mb' }));
 
