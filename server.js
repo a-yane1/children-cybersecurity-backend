@@ -11,7 +11,7 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 
 // Trust Railway proxy - ADD THIS LINE
-app.set('trust proxy', true);
+app.set('trust proxy', 1);
 
 // Middleware
 app.use(helmet());
